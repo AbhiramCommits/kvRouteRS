@@ -2,8 +2,9 @@ VENV := mocks/.venv
 MOCK_PY := $(VENV)/bin/python
 PY3 := $(shell command -v python3.11 || command -v python3.13 || command -v python3.12 || command -v python3)
 BENCH_PY := bench/.venv/bin/python
+PYENV_PY := python/.venv/bin/python
 
-.PHONY: fmt fmt-check lint test install-mocks run-mocks run-router bench-install bench up down
+.PHONY: fmt fmt-check lint test install-mocks run-mocks run-router bench-install bench up down python-install python-test
 
 fmt:
 	cargo fmt --all
@@ -40,3 +41,12 @@ up:
 
 down:
 	docker compose down
+
+python-install:
+	$(PY3) -m venv python/.venv
+	$(PYENV_PY) -m pip install --quiet --upgrade pip
+	$(PYENV_PY) -m pip install --quiet maturin pytest
+
+python-test: python-install
+	$(PYENV_PY) -m maturin develop --manifest-path crates/router-py/Cargo.toml
+	$(PYENV_PY) -m pytest python/tests -q

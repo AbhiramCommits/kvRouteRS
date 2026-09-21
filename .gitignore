@@ -2,6 +2,7 @@
 mocks/.venv/
 bench/.venv/
 bench/results/
+python/.venv/
 __pycache__/
 *.pyc
 .DS_Store

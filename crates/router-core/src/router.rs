@@ -284,6 +284,9 @@ mod tests {
             prefix_index_ttl_secs: 300,
             prefix_index_max_entries: 100_000,
             kv_transfer_cost_ms: 20,
+            metrics_scrape: false,
+            engine_metrics_interval_secs: 15,
+            engine_cache_hit_metric: "vllm:gpu_prefix_cache_hit_rate".to_string(),
         };
         let registry = Arc::new(WorkerRegistry::from_config(&config.workers));
         for id in healthy {

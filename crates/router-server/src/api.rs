@@ -172,6 +172,11 @@ impl RequestTelemetry {
         metrics::record_request(&self.worker.url, self.policy, 200);
         metrics::record_cache_hit_blocks(self.matched_prefix_blocks as u64);
         metrics::record_prompt_blocks(self.prompt_blocks as u64);
+        metrics::record_hit_stats(
+            &self.worker.url,
+            self.matched_prefix_blocks as u64,
+            self.prompt_blocks as u64,
+        );
         metrics::record_ttft(self.policy, ttft.as_secs_f64());
         metrics::record_request_duration(self.policy, total.as_secs_f64());
         metrics::record_tokens_generated(&self.worker.url, tokens);

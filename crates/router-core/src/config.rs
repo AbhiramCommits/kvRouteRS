@@ -29,7 +29,7 @@ impl fmt::Display for Pool {
 }
 
 /// How the router picks a worker for an incoming request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutingPolicy {
     /// Strictly cyclic among healthy workers.
@@ -88,6 +88,19 @@ pub struct RouterConfig {
     /// Simulated KV transfer latency (ms) for the disaggregated mode.
     #[serde(default = "default_kv_transfer_cost_ms")]
     pub kv_transfer_cost_ms: u64,
+    /// Poll real engines' Prometheus endpoints and surface their *reported*
+    /// prefix cache hit rate next to the router's *predicted* one. The gap is
+    /// `kvrouter_hit_rate_prediction_error`.
+    #[serde(default)]
+    pub metrics_scrape: bool,
+    /// How often to poll each worker's `/metrics` endpoint.
+    #[serde(default = "default_engine_metrics_interval_secs")]
+    pub engine_metrics_interval_secs: u64,
+    /// Metric name holding the engine's prefix-cache hit rate on its
+    /// `/metrics` endpoint. vLLM reports `vllm:gpu_prefix_cache_hit_rate`;
+    /// SGLang builds vary, so check `/metrics` on your build.
+    #[serde(default = "default_engine_cache_hit_metric")]
+    pub engine_cache_hit_metric: String,
 }
 
 fn default_health_check_interval_secs() -> u64 {
@@ -116,6 +129,14 @@ fn default_prefix_index_max_entries() -> usize {
 
 fn default_kv_transfer_cost_ms() -> u64 {
     20
+}
+
+fn default_engine_metrics_interval_secs() -> u64 {
+    15
+}
+
+fn default_engine_cache_hit_metric() -> String {
+    "vllm:gpu_prefix_cache_hit_rate".to_string()
 }
 
 impl RouterConfig {

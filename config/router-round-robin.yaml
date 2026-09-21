@@ -8,6 +8,13 @@ load_weight: 0.5
 prefix_index_ttl_secs: 300
 prefix_index_max_entries: 100000
 
+# Engine-side cache observability (real vLLM/SGLang backends, not the mocks):
+# scrape each worker's /metrics and report the engine's actual prefix cache
+# hit rate next to the router's predicted one.
+metrics_scrape: false
+engine_metrics_interval_secs: 15
+engine_cache_hit_metric: "vllm:gpu_prefix_cache_hit_rate"
+
 kv_transfer_cost_ms: 20
 
 workers:

@@ -3,13 +3,14 @@ name = "router-py"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PyO3 bindings for the kvRouteRS router (stub)"
+description = "PyO3 bindings for the kvRouteRS router (kvrouters)"
 
 [lib]
-name = "router_py"
+name = "kvrouters"
 crate-type = ["cdylib"]
 
 [dependencies]
+router-core = { workspace = true }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
 
 [build-dependencies]
