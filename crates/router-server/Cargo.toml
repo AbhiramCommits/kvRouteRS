@@ -1,0 +1,18 @@
+[package]
+name = "router-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenAI-compatible HTTP frontend for the kvRouteRS router"
+
+[dependencies]
+router-core = { workspace = true }
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }

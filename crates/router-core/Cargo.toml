@@ -1,0 +1,11 @@
+[package]
+name = "router-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Routing logic, prefix index, and worker registry for the kvRouteRS router"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }

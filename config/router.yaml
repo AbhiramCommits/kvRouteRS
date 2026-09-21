@@ -1,0 +1,8 @@
+routing_policy: round_robin
+health_check_interval_secs: 5
+
+workers:
+  - url: http://127.0.0.1:8001
+    pool: both
+  - url: http://127.0.0.1:8002
+    pool: both
