@@ -21,6 +21,7 @@ Usage: python mock_vllm.py [port]
 import asyncio
 import hashlib
 import json
+import math
 import random
 import re
 import sys
@@ -36,10 +37,14 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8001
 BASE_TTFT_SECONDS = 0.05            # fixed per-request overhead
 PREFILL_SECONDS_PER_TOKEN = 0.005   # simulated prefill cost per prompt token
 INTER_TOKEN_SECONDS = 0.03          # simulated decode step
+DECODE_DISPATCH_SECONDS = 0.005     # fixed delay before the first decode token
 PREFIX_HIT_SPEEDUP = 0.2            # TTFT multiplier on a prefix hit (-80%)
 DEFAULT_MAX_TOKENS = 16
 MAX_TOKENS_CAP = 256
 PREFIX_CACHE_CAP = 2048
+# Mirrors router-core's default prompt_block_chars; only used for the
+# informational block count in prefill results.
+PREFILL_BLOCK_CHARS = 512
 MODEL_ID = "mock-vllm"
 
 VOCAB = [
@@ -132,6 +137,7 @@ async def models():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
+    phase = request.headers.get("x-router-phase", "full")
     body = await request.json()
     model = body.get("model", MODEL_ID)
     messages = body.get("messages") or []
@@ -141,9 +147,44 @@ async def chat_completions(request: Request):
     tokens = prompt_tokens(messages)
     prompt_count = len(tokens)
     matched = record_and_match(prefix_hashes(tokens))
+    prompt_chars = sum(
+        len(m.get("content") or "")
+        for m in messages
+        if isinstance(m.get("content"), str)
+    )
+    prompt_blocks = math.ceil(prompt_chars / PREFILL_BLOCK_CHARS) if prompt_chars else 0
 
-    prefill_seconds = BASE_TTFT_SECONDS + PREFILL_SECONDS_PER_TOKEN * prompt_count
-    ttft_seconds = prefill_seconds * PREFIX_HIT_SPEEDUP if matched > 0 else prefill_seconds
+    if phase == "prefill":
+        # Prefill-only phase (disaggregated mode): sleep through the simulated
+        # prefill, then return KV metadata without generating tokens. The
+        # router uses this to "materialize" the KV cache before transferring
+        # it to a decode worker.
+        prefill_seconds = BASE_TTFT_SECONDS + PREFILL_SECONDS_PER_TOKEN * prompt_count
+        ttft_seconds = prefill_seconds * PREFIX_HIT_SPEEDUP if matched > 0 else prefill_seconds
+        await asyncio.sleep(ttft_seconds)
+        return JSONResponse(
+            {
+                "object": "prefill.result",
+                "prompt_blocks": prompt_blocks,
+                # Approximate: the mock tracks token prefixes, not character
+                # blocks; the router's own index is authoritative.
+                "matched_blocks": matched,
+                "usage": {"prompt_tokens": prompt_count, "cached_tokens": matched},
+            },
+            headers={
+                "x-kv-prefix-hit": str(matched),
+                "x-ttft-ms": f"{ttft_seconds * 1000:.2f}",
+            },
+        )
+
+    if phase == "decode":
+        # Decode-only phase: the KV cache is assumed present (the router just
+        # transferred it), so the prefill cost is skipped and only a fixed
+        # dispatch delay precedes the first token.
+        ttft_seconds = DECODE_DISPATCH_SECONDS
+    else:
+        prefill_seconds = BASE_TTFT_SECONDS + PREFILL_SECONDS_PER_TOKEN * prompt_count
+        ttft_seconds = prefill_seconds * PREFIX_HIT_SPEEDUP if matched > 0 else prefill_seconds
 
     seed = int(hashlib.sha256(json.dumps(messages, sort_keys=True).encode()).hexdigest(), 16)
     words = generate_words(seed, max_tokens)

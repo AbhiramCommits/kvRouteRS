@@ -5,9 +5,10 @@ use tracing::{info, warn};
 use crate::state::AppState;
 
 /// Background task that probes each worker's `/health` endpoint every
-/// `health_check_interval_secs` and mirrors the result into the shared registry.
-/// Requests consult the registry on every selection, so a failed probe
-/// immediately removes the worker from rotation.
+/// `health_check_interval_secs` and mirrors the result into the shared
+/// registry. Requests consult the registry on every selection, so a failed
+/// probe immediately removes the worker from rotation. A worker marked down
+/// also loses its prefix-index entries: its KV cache died with it.
 pub fn spawn_health_poller(state: AppState) {
     tokio::spawn(async move {
         let interval = Duration::from_secs(state.config.health_check_interval_secs.max(1));
@@ -34,6 +35,9 @@ pub fn spawn_health_poller(state: AppState) {
                 }
                 if state.registry.set_healthy(worker.id, healthy) {
                     info!(worker = %worker.url, healthy, "worker health state changed");
+                    if !healthy {
+                        state.router.prefix_index().remove_worker(worker.id);
+                    }
                 }
             }
             tokio::time::sleep(interval).await;

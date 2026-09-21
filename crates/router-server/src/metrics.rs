@@ -9,7 +9,7 @@ use router_core::RoutingPolicy;
 /// the labeled request counter.
 ///
 /// Deliberately avoids the `prometheus` crate: the router exposes a handful of
-/// counters and one gauge, and plain atomics are trivially safe to update from
+/// counters and gauges, and plain atomics are trivially safe to update from
 /// the request hot path without a global registry.
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -21,6 +21,9 @@ pub struct Metrics {
     ttft_count: AtomicU64,
     total_micros_sum: AtomicU64,
     total_count: AtomicU64,
+    kv_transfers_total: AtomicU64,
+    kv_transfer_micros_sum: AtomicU64,
+    kv_transfer_count: AtomicU64,
 }
 
 impl Metrics {
@@ -36,6 +39,14 @@ impl Metrics {
         self.total_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a (simulated) KV transfer between the two disaggregated phases.
+    pub fn observe_kv_transfer(&self, duration: Duration) {
+        self.kv_transfers_total.fetch_add(1, Ordering::Relaxed);
+        self.kv_transfer_micros_sum
+            .fetch_add(micros(duration), Ordering::Relaxed);
+        self.kv_transfer_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn inc_upstream_error(&self) {
         self.upstream_errors.fetch_add(1, Ordering::Relaxed);
     }
@@ -48,8 +59,13 @@ impl Metrics {
         self.health_check_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Render the full exposition format, with the current healthy-worker gauge.
-    pub fn render(&self, healthy_workers: usize) -> String {
+    /// Render the full exposition format, with the live gauges.
+    pub fn render(
+        &self,
+        healthy_workers: usize,
+        inflight_requests: u64,
+        index_entries: usize,
+    ) -> String {
         let mut out = String::new();
         let by_policy = self
             .requests_by_policy
@@ -94,11 +110,36 @@ impl Metrics {
             self.total_micros_sum.load(Ordering::Relaxed),
             self.total_count.load(Ordering::Relaxed),
         );
+        plain_counter(
+            &mut out,
+            "router_kv_transfers_total",
+            "KV transfers between prefill and decode workers.",
+            self.kv_transfers_total.load(Ordering::Relaxed),
+        );
+        seconds_counter(
+            &mut out,
+            "router_kv_transfer_seconds",
+            "KV transfer time (simulated).",
+            self.kv_transfer_micros_sum.load(Ordering::Relaxed),
+            self.kv_transfer_count.load(Ordering::Relaxed),
+        );
         gauge(
             &mut out,
             "router_healthy_workers",
             "Workers currently marked healthy.",
             healthy_workers,
+        );
+        gauge(
+            &mut out,
+            "router_inflight_requests",
+            "Requests currently being proxied.",
+            inflight_requests as usize,
+        );
+        gauge(
+            &mut out,
+            "router_prefix_index_entries",
+            "Entries in the router-side prefix index.",
+            index_entries,
         );
         out
     }

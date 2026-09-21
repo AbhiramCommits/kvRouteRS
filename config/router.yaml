@@ -1,6 +1,20 @@
 routing_policy: round_robin
 health_check_interval_secs: 5
 
+# Cache-aware routing (see crates/router-core/src/router.rs):
+#   score = cache_hit_blocks * cache_weight - in_flight * load_weight
+prompt_block_chars: 512
+cache_weight: 1.0
+load_weight: 0.5
+
+# Prefix index lifecycle:
+prefix_index_ttl_secs: 300
+prefix_index_max_entries: 100000
+
+# Disaggregated mode: simulated KV transfer latency (ms) between the prefill
+# and decode phases.
+kv_transfer_cost_ms: 20
+
 workers:
   - url: http://127.0.0.1:8001
     pool: both

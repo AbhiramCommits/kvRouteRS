@@ -6,8 +6,9 @@ mod state;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use router_core::RouterConfig;
+use router_core::{PrefixIndex, RouterConfig};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -41,6 +42,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let state = state::AppState::new(config.clone())?;
     health::spawn_health_poller(state.clone());
+    // Bounded prefix index: TTL expiry + LRU cap, applied on a detached
+    // background task so the request path never pays eviction cost.
+    PrefixIndex::spawn_eviction_task(
+        state.router.prefix_index(),
+        Duration::from_secs(config.prefix_index_ttl_secs),
+        config.prefix_index_max_entries,
+    );
 
     let app = api::build_router(state);
     let listener = tokio::net::TcpListener::bind(bind_address).await?;

@@ -32,10 +32,13 @@ impl fmt::Display for Pool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutingPolicy {
+    /// Strictly cyclic among healthy workers.
     RoundRobin,
-    /// Reserved for the next milestone; selection currently fails with an explicit
-    /// [`RouterError::PolicyNotImplemented`] so there is a clear seam to build on.
+    /// Score every healthy worker on cache affinity and load, pick the best.
     CacheAware,
+    /// Prefill and decode are served by different pools, with an explicit KV
+    /// transfer between the two phases.
+    Disaggregated,
 }
 
 impl fmt::Display for RoutingPolicy {
@@ -43,6 +46,7 @@ impl fmt::Display for RoutingPolicy {
         let s = match self {
             RoutingPolicy::RoundRobin => "round_robin",
             RoutingPolicy::CacheAware => "cache_aware",
+            RoutingPolicy::Disaggregated => "disaggregated",
         };
         f.write_str(s)
     }
@@ -56,16 +60,62 @@ pub struct WorkerConfig {
 }
 
 /// Top-level router configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RouterConfig {
     pub workers: Vec<WorkerConfig>,
     pub routing_policy: RoutingPolicy,
     #[serde(default = "default_health_check_interval_secs")]
     pub health_check_interval_secs: u64,
+    /// Character block size for prefix-hash chains (vLLM blocks are 16 tokens;
+    /// we use 512 characters as a tokenizer-free stand-in).
+    #[serde(default = "default_prompt_block_chars")]
+    pub prompt_block_chars: usize,
+    /// Score multiplier for matched cache blocks:
+    /// `score = cache_hit_blocks * cache_weight - in_flight * load_weight`.
+    #[serde(default = "default_cache_weight")]
+    pub cache_weight: f64,
+    /// Score penalty per in-flight request on a worker. A non-zero load term
+    /// keeps pure cache affinity from hot-spotting a single replica.
+    #[serde(default = "default_load_weight")]
+    pub load_weight: f64,
+    /// Prefix-index entries expire after this many seconds without being
+    /// written or matched.
+    #[serde(default = "default_prefix_index_ttl_secs")]
+    pub prefix_index_ttl_secs: u64,
+    /// Hard cap on prefix-index entries; the LRU sweep trims the oldest.
+    #[serde(default = "default_prefix_index_max_entries")]
+    pub prefix_index_max_entries: usize,
+    /// Simulated KV transfer latency (ms) for the disaggregated mode.
+    #[serde(default = "default_kv_transfer_cost_ms")]
+    pub kv_transfer_cost_ms: u64,
 }
 
 fn default_health_check_interval_secs() -> u64 {
     5
+}
+
+fn default_prompt_block_chars() -> usize {
+    512
+}
+
+fn default_cache_weight() -> f64 {
+    1.0
+}
+
+fn default_load_weight() -> f64 {
+    0.5
+}
+
+fn default_prefix_index_ttl_secs() -> u64 {
+    300
+}
+
+fn default_prefix_index_max_entries() -> usize {
+    100_000
+}
+
+fn default_kv_transfer_cost_ms() -> u64 {
+    20
 }
 
 impl RouterConfig {
@@ -103,7 +153,7 @@ workers:
 "#;
 
     #[test]
-    fn parses_config() {
+    fn parses_config_with_defaults() {
         let config = RouterConfig::from_yaml(CONFIG).unwrap();
         assert_eq!(config.workers.len(), 2);
         assert_eq!(config.workers[0].url, "http://127.0.0.1:8001");
@@ -111,15 +161,48 @@ workers:
         assert_eq!(config.workers[1].pool, Pool::Prefill);
         assert_eq!(config.routing_policy, RoutingPolicy::RoundRobin);
         assert_eq!(config.health_check_interval_secs, 5);
+        assert_eq!(config.prompt_block_chars, 512);
+        assert_eq!(config.cache_weight, 1.0);
+        assert_eq!(config.load_weight, 0.5);
+        assert_eq!(config.prefix_index_ttl_secs, 300);
+        assert_eq!(config.prefix_index_max_entries, 100_000);
+        assert_eq!(config.kv_transfer_cost_ms, 20);
     }
 
     #[test]
-    fn accepts_cache_aware_policy() {
-        let config = RouterConfig::from_yaml(
+    fn accepts_all_policies() {
+        let cache_aware = RouterConfig::from_yaml(
             "routing_policy: cache_aware\nworkers:\n  - url: http://x\n    pool: decode\n",
         )
         .unwrap();
-        assert_eq!(config.routing_policy, RoutingPolicy::CacheAware);
+        assert_eq!(cache_aware.routing_policy, RoutingPolicy::CacheAware);
+
+        let disaggregated = RouterConfig::from_yaml(
+            "routing_policy: disaggregated\nworkers:\n  - url: http://x\n    pool: prefill\n",
+        )
+        .unwrap();
+        assert_eq!(disaggregated.routing_policy, RoutingPolicy::Disaggregated);
+    }
+
+    #[test]
+    fn accepts_explicit_knobs() {
+        let config = RouterConfig::from_yaml(
+            "routing_policy: cache_aware\n\
+             prompt_block_chars: 256\n\
+             cache_weight: 2.0\n\
+             load_weight: 0.25\n\
+             prefix_index_ttl_secs: 60\n\
+             prefix_index_max_entries: 1000\n\
+             kv_transfer_cost_ms: 42\n\
+             workers:\n  - url: http://x\n    pool: both\n",
+        )
+        .unwrap();
+        assert_eq!(config.prompt_block_chars, 256);
+        assert_eq!(config.cache_weight, 2.0);
+        assert_eq!(config.load_weight, 0.25);
+        assert_eq!(config.prefix_index_ttl_secs, 60);
+        assert_eq!(config.prefix_index_max_entries, 1000);
+        assert_eq!(config.kv_transfer_cost_ms, 42);
     }
 
     #[test]
