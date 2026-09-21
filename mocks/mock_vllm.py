@@ -4,24 +4,28 @@ Implements just enough of an OpenAI-compatible surface for kvRouteRS to proxy:
 
     GET  /health
     GET  /v1/models
-    POST /v1/chat/completions   (streaming and non-streaming)
+    POST /v1/chat/completions   (streaming, non-streaming, plus prefill-only
+                                 and decode-only phases for disaggregated mode)
 
 Timing model
 ------------
-* Time-to-first-token is proportional to the prompt token count, simulating
-  prefill: ``TTFT = base + prefill_cost * prompt_tokens``.
-* Decode tokens then arrive at a fixed inter-token delay.
-* An in-process LRU of prompt-prefix hashes stands in for the KV cache: when a
-  prefix of the incoming prompt has been seen before, TTFT is cut by 80%.
-  This makes cache-aware routing measurable with zero GPUs.
+* TTFT is proportional to the prompt token count (simulating prefill), plus a
+  fixed dispatch delay for decode-only phases.
+* Decode tokens arrive at a fixed inter-token delay.
+* An in-process LRU of prompt BLOCK-prefix hashes stands in for the KV cache.
+  Blocks are 512 characters, mirroring router-core's chain-hash layout. The
+  fraction of cached blocks cuts the prefill cost proportionally, up to 80% on
+  a full hit. This makes cache-aware routing measurable with zero GPUs.
 
-Usage: python mock_vllm.py [port]
+Usage: python mock_vllm.py [port] [prefix_cache_capacity_blocks]
+Environment: MOCK_PORT, MOCK_PREFIX_CAP
 """
 
 import asyncio
 import hashlib
 import json
 import math
+import os
 import random
 import re
 import sys
@@ -32,19 +36,26 @@ from collections import OrderedDict
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8001
+
+def _env_int(name, default):
+    value = os.environ.get(name)
+    return int(value) if value else default
+
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else _env_int("MOCK_PORT", 8001)
+PREFIX_CACHE_CAP = (
+    int(sys.argv[2]) if len(sys.argv) > 2 else _env_int("MOCK_PREFIX_CAP", 2048)
+)
 
 BASE_TTFT_SECONDS = 0.05            # fixed per-request overhead
 PREFILL_SECONDS_PER_TOKEN = 0.005   # simulated prefill cost per prompt token
 INTER_TOKEN_SECONDS = 0.03          # simulated decode step
 DECODE_DISPATCH_SECONDS = 0.005     # fixed delay before the first decode token
-PREFIX_HIT_SPEEDUP = 0.2            # TTFT multiplier on a prefix hit (-80%)
+PREFIX_HIT_SPEEDUP = 0.8            # fraction of prefill cost avoided on a full hit
 DEFAULT_MAX_TOKENS = 16
 MAX_TOKENS_CAP = 256
-PREFIX_CACHE_CAP = 2048
-# Mirrors router-core's default prompt_block_chars; only used for the
-# informational block count in prefill results.
-PREFILL_BLOCK_CHARS = 512
+# Mirrors router-core's default prompt_block_chars.
+PREFIX_BLOCK_CHARS = 512
 MODEL_ID = "mock-vllm"
 
 VOCAB = [
@@ -58,7 +69,10 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9']+")
 
 app = FastAPI(title="mock-vllm")
 
-# LRU of prompt-prefix hashes this process has "cached" (our KV-cache stand-in).
+# LRU of prompt BLOCK-prefix hashes this process has "cached" (our KV-cache
+# stand-in). Entries are 512-character blocks, matching the router's chain hash
+# layout; the capacity is in blocks so residency behaves like an engine with a
+# block-based KV cache.
 prefix_cache = OrderedDict()
 
 
@@ -66,19 +80,30 @@ def tokenize(text):
     return TOKEN_RE.findall(text.lower())
 
 
-def prefix_hashes(tokens):
-    """SHA-256 digest of every non-empty prefix of the token list."""
+def canonical_prompt(messages):
+    """Mirror of router-core's canonical_prompt: one `role: content` line per
+    message, joined by newlines. The block layout below depends on this."""
+    return "\n".join(
+        f"{m.get('role', '')}: {m.get('content', '')}"
+        for m in messages
+        if isinstance(m.get("content"), str)
+    )
+
+
+def block_prefix_hashes(text):
+    """SHA-256 chain over every block of the prompt (last partial block
+    included, matching router-core's chain_hash block count)."""
     hasher = hashlib.sha256()
     hashes = []
-    for token in tokens:
-        hasher.update(token.encode("utf-8"))
-        hasher.update(b"\x00")
+    for i in range(0, len(text), PREFIX_BLOCK_CHARS):
+        hasher.update(text[i:i + PREFIX_BLOCK_CHARS].encode("utf-8"))
         hashes.append(hasher.digest())
     return hashes
 
 
 def record_and_match(hashes):
-    """Insert all prefix hashes into the LRU; return the longest matched prefix."""
+    """Insert all block hashes into the LRU; return the longest matching
+    prefix length in blocks."""
     matched = 0
     for i in range(len(hashes) - 1, -1, -1):
         if hashes[i] in prefix_cache:
@@ -144,36 +169,36 @@ async def chat_completions(request: Request):
     max_tokens = min(int(body.get("max_tokens") or DEFAULT_MAX_TOKENS), MAX_TOKENS_CAP)
     stream = bool(body.get("stream", False))
 
+    prompt_text = canonical_prompt(messages)
+    block_hashes = block_prefix_hashes(prompt_text)
+    total_blocks = len(block_hashes) or 1
+    matched_blocks = record_and_match(block_hashes)
+    hit_fraction = matched_blocks / total_blocks
+
     tokens = prompt_tokens(messages)
     prompt_count = len(tokens)
-    matched = record_and_match(prefix_hashes(tokens))
-    prompt_chars = sum(
-        len(m.get("content") or "")
-        for m in messages
-        if isinstance(m.get("content"), str)
+    prefill_seconds = BASE_TTFT_SECONDS + PREFILL_SECONDS_PER_TOKEN * prompt_count
+    ttft_seconds = BASE_TTFT_SECONDS + PREFILL_SECONDS_PER_TOKEN * prompt_count * (
+        1 - PREFIX_HIT_SPEEDUP * hit_fraction
     )
-    prompt_blocks = math.ceil(prompt_chars / PREFILL_BLOCK_CHARS) if prompt_chars else 0
 
     if phase == "prefill":
         # Prefill-only phase (disaggregated mode): sleep through the simulated
         # prefill, then return KV metadata without generating tokens. The
         # router uses this to "materialize" the KV cache before transferring
         # it to a decode worker.
-        prefill_seconds = BASE_TTFT_SECONDS + PREFILL_SECONDS_PER_TOKEN * prompt_count
-        ttft_seconds = prefill_seconds * PREFIX_HIT_SPEEDUP if matched > 0 else prefill_seconds
         await asyncio.sleep(ttft_seconds)
         return JSONResponse(
             {
                 "object": "prefill.result",
-                "prompt_blocks": prompt_blocks,
-                # Approximate: the mock tracks token prefixes, not character
-                # blocks; the router's own index is authoritative.
-                "matched_blocks": matched,
-                "usage": {"prompt_tokens": prompt_count, "cached_tokens": matched},
+                "prompt_blocks": total_blocks,
+                "matched_blocks": matched_blocks,
+                "usage": {"prompt_tokens": prompt_count, "cached_blocks": matched_blocks},
             },
             headers={
-                "x-kv-prefix-hit": str(matched),
+                "x-kv-prefix-hit": str(matched_blocks),
                 "x-ttft-ms": f"{ttft_seconds * 1000:.2f}",
+                "x-completion-tokens": "0",
             },
         )
 
@@ -182,9 +207,6 @@ async def chat_completions(request: Request):
         # transferred it), so the prefill cost is skipped and only a fixed
         # dispatch delay precedes the first token.
         ttft_seconds = DECODE_DISPATCH_SECONDS
-    else:
-        prefill_seconds = BASE_TTFT_SECONDS + PREFILL_SECONDS_PER_TOKEN * prompt_count
-        ttft_seconds = prefill_seconds * PREFIX_HIT_SPEEDUP if matched > 0 else prefill_seconds
 
     seed = int(hashlib.sha256(json.dumps(messages, sort_keys=True).encode()).hexdigest(), 16)
     words = generate_words(seed, max_tokens)
@@ -192,7 +214,11 @@ async def chat_completions(request: Request):
 
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
-    headers = {"x-kv-prefix-hit": str(matched), "x-ttft-ms": f"{ttft_seconds * 1000:.2f}"}
+    headers = {
+        "x-kv-prefix-hit": str(matched_blocks),
+        "x-ttft-ms": f"{ttft_seconds * 1000:.2f}",
+        "x-completion-tokens": str(len(words)),
+    }
 
     if stream:
         async def event_stream():
@@ -227,7 +253,7 @@ async def chat_completions(request: Request):
                 "prompt_tokens": prompt_count,
                 "completion_tokens": len(words),
                 "total_tokens": prompt_count + len(words),
-                "prompt_tokens_details": {"cached_tokens": matched},
+                "prompt_tokens_details": {"cached_blocks": matched_blocks},
             },
         },
         headers=headers,
@@ -237,4 +263,4 @@ async def chat_completions(request: Request):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

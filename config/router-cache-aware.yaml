@@ -1,0 +1,21 @@
+routing_policy: cache_aware
+health_check_interval_secs: 2
+
+prompt_block_chars: 512
+cache_weight: 1.0
+load_weight: 0.5
+
+prefix_index_ttl_secs: 300
+prefix_index_max_entries: 100000
+
+kv_transfer_cost_ms: 20
+
+workers:
+  - url: http://mock1:8001
+    pool: both
+  - url: http://mock2:8001
+    pool: both
+  - url: http://mock3:8001
+    pool: both
+  - url: http://mock4:8001
+    pool: both

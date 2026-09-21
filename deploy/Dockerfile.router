@@ -1,0 +1,13 @@
+FROM rust:1.85-slim AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rustfmt.toml clippy.toml ./
+COPY crates crates
+RUN cargo build --release -p router-server
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/router-server /usr/local/bin/router-server
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/router-server"]

@@ -16,6 +16,9 @@ pub struct RouteDecision {
     /// Longest prefix of the prompt's block chain the chosen worker is believed
     /// to hold, measured before this request was recorded against it.
     pub matched_prefix_len: usize,
+    /// Number of blocks in this request's prefix-hash chain (== prompt blocks).
+    /// Together with `matched_prefix_len` this yields the cache hit rate.
+    pub prompt_blocks: usize,
     /// Selection score
     /// `cache_hit_blocks * cache_weight - in_flight * load_weight`.
     /// `0.0` for policies that do not score (round-robin).
@@ -161,6 +164,7 @@ impl Router {
                 Ok(RouteDecision {
                     worker,
                     matched_prefix_len,
+                    prompt_blocks: chain.len(),
                     score: 0.0,
                 })
             }
@@ -174,6 +178,7 @@ impl Router {
                 Ok(RouteDecision {
                     worker: best.worker,
                     matched_prefix_len: best.matched,
+                    prompt_blocks: chain.len(),
                     score: best.candidate.score,
                 })
             }
@@ -212,6 +217,7 @@ impl Router {
         Ok(RouteDecision {
             worker: best.worker,
             matched_prefix_len: best.matched,
+            prompt_blocks: chain.len(),
             score: best.candidate.score,
         })
     }

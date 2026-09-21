@@ -1,0 +1,121 @@
+name: kvrouter
+
+services:
+  mock1:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.mock
+    environment:
+      MOCK_PORT: "8001"
+      MOCK_PREFIX_CAP: "80"
+    ports:
+      - "8101:8001"
+
+  mock2:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.mock
+    environment:
+      MOCK_PORT: "8001"
+      MOCK_PREFIX_CAP: "80"
+    ports:
+      - "8102:8001"
+
+  mock3:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.mock
+    environment:
+      MOCK_PORT: "8001"
+      MOCK_PREFIX_CAP: "80"
+    ports:
+      - "8103:8001"
+
+  mock4:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.mock
+    environment:
+      MOCK_PORT: "8001"
+      MOCK_PREFIX_CAP: "80"
+    ports:
+      - "8104:8001"
+
+  router-round-robin:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.router
+    environment:
+      ROUTER_CONFIG: /etc/router/config.yaml
+      ROUTER_BIND: 0.0.0.0:8080
+    volumes:
+      - ./config/router-round-robin.yaml:/etc/router/config.yaml:ro
+    ports:
+      # Host 8080 is held by a local Spark master; expose the demo routers on
+      # 18080-18082 instead. Container-internal port stays 8080.
+      - "18080:8080"
+    depends_on:
+      - mock1
+      - mock2
+      - mock3
+      - mock4
+
+  router-cache-aware:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.router
+    environment:
+      ROUTER_CONFIG: /etc/router/config.yaml
+      ROUTER_BIND: 0.0.0.0:8080
+    volumes:
+      - ./config/router-cache-aware.yaml:/etc/router/config.yaml:ro
+    ports:
+      - "18081:8080"
+    depends_on:
+      - mock1
+      - mock2
+      - mock3
+      - mock4
+
+  router-disaggregated:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.router
+    environment:
+      ROUTER_CONFIG: /etc/router/config.yaml
+      ROUTER_BIND: 0.0.0.0:8080
+    volumes:
+      - ./config/router-disaggregated.yaml:/etc/router/config.yaml:ro
+    ports:
+      - "18082:8080"
+    depends_on:
+      - mock1
+      - mock2
+      - mock3
+      - mock4
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "19090:9090"
+    depends_on:
+      - router-round-robin
+      - router-cache-aware
+      - router-disaggregated
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/grafana/provisioning/datasources/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./deploy/grafana/provisioning/dashboards/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro
+      - ./deploy/grafana/dashboards/kvrouter.json:/var/lib/grafana/dashboards/kvrouter.json:ro
+    ports:
+      - "13000:3000"
+    depends_on:
+      - prometheus

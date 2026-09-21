@@ -1,6 +1,5 @@
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
@@ -17,8 +16,7 @@ use router_core::{
 use serde_json::{json, Value};
 use tracing::{error, info, info_span, warn, Instrument};
 
-use crate::metrics::Metrics;
-use crate::state::AppState;
+use crate::{metrics, state::AppState};
 
 /// Errors surfaced over HTTP. Maps onto OpenAI-style `{"error": {...}}` bodies.
 #[derive(Debug)]
@@ -106,8 +104,8 @@ struct RequestTelemetry {
     worker: Worker,
     policy: RoutingPolicy,
     matched_prefix_blocks: usize,
+    prompt_blocks: usize,
     score: f64,
-    metrics: Arc<Metrics>,
     started: Instant,
     /// Held until the response body is fully drained (or the request fails),
     /// releasing the worker's in-flight count exactly once via `Drop`. Never
@@ -127,7 +125,13 @@ enum CompletionDetails {
 }
 
 impl RequestTelemetry {
-    fn finish(&self, ttft: Duration, total: Duration, upstream_prefix_hit: Option<&str>) {
+    fn finish(
+        &self,
+        ttft: Duration,
+        total: Duration,
+        upstream_prefix_hit: Option<&str>,
+        tokens: u64,
+    ) {
         match &self.details {
             CompletionDetails::Single => info!(
                 request_id = %self.request_id,
@@ -135,7 +139,9 @@ impl RequestTelemetry {
                 pool = %self.worker.pool,
                 policy = %self.policy,
                 matched_prefix_blocks = self.matched_prefix_blocks,
+                prompt_blocks = self.prompt_blocks,
                 score = self.score,
+                tokens = tokens,
                 upstream_prefix_hit = upstream_prefix_hit.unwrap_or("n/a"),
                 ttft_ms = ttft.as_millis() as u64,
                 total_latency_ms = total.as_millis() as u64,
@@ -152,7 +158,9 @@ impl RequestTelemetry {
                 pool = %self.worker.pool,
                 policy = %self.policy,
                 matched_prefix_blocks = self.matched_prefix_blocks,
+                prompt_blocks = self.prompt_blocks,
                 score = self.score,
+                tokens = tokens,
                 prefill_ms,
                 kv_transfer_ms,
                 upstream_prefix_hit = upstream_prefix_hit.unwrap_or("n/a"),
@@ -161,7 +169,12 @@ impl RequestTelemetry {
                 "chat completion served (disaggregated)"
             ),
         }
-        self.metrics.observe_request(self.policy, ttft, total);
+        metrics::record_request(&self.worker.url, self.policy, 200);
+        metrics::record_cache_hit_blocks(self.matched_prefix_blocks as u64);
+        metrics::record_prompt_blocks(self.prompt_blocks as u64);
+        metrics::record_ttft(self.policy, ttft.as_secs_f64());
+        metrics::record_request_duration(self.policy, total.as_secs_f64());
+        metrics::record_tokens_generated(&self.worker.url, tokens);
     }
 }
 
@@ -169,29 +182,40 @@ struct ProxyStreamState {
     inner: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
     telemetry: RequestTelemetry,
     upstream_prefix_hit: Option<String>,
+    /// Non-streaming responses cannot be token-counted without buffering, so
+    /// we fall back to the upstream's `x-completion-tokens` header.
+    completion_tokens: Option<u64>,
     streaming: bool,
     done_seen: bool,
     first_chunk_after: Option<Duration>,
+    /// Tokens counted from streamed `delta.content` chunks.
+    tokens: u64,
+    errored: bool,
 }
 
 /// Stream the upstream body back to the client without buffering the whole
 /// response. In streaming mode, guarantees the SSE stream is terminated with
-/// `data: [DONE]` even if the upstream omits it. Emits the per-request log
-/// record (TTFT, total latency, ...) — and drops the in-flight guard — once
-/// the body is fully drained.
+/// `data: [DONE]` even if the upstream omits it, and counts tokens from the
+/// `delta.content` chunks. Emits the per-request log record and metrics (TTFT,
+/// total latency, tokens, ...) — and drops the in-flight guard — once the body
+/// is fully drained.
 fn proxy_stream(
     upstream: reqwest::Response,
     telemetry: RequestTelemetry,
     upstream_prefix_hit: Option<String>,
+    completion_tokens: Option<u64>,
     streaming: bool,
 ) -> impl Stream<Item = Result<Bytes, io::Error>> + Send {
     let state = ProxyStreamState {
         inner: Box::pin(upstream.bytes_stream()),
         telemetry,
         upstream_prefix_hit,
+        completion_tokens,
         streaming,
         done_seen: false,
         first_chunk_after: None,
+        tokens: 0,
+        errored: false,
     };
     unfold(state, |mut state| async move {
         match state.inner.next().await {
@@ -202,6 +226,9 @@ fn proxy_stream(
                 if state.streaming && !state.done_seen && chunk_contains_done(&chunk) {
                     state.done_seen = true;
                 }
+                if state.streaming {
+                    state.tokens += count_content_chunks(&chunk);
+                }
                 Some((Ok(chunk), state))
             }
             Some(Err(error)) => {
@@ -211,21 +238,34 @@ fn proxy_stream(
                     %error,
                     "upstream stream error"
                 );
-                state.telemetry.metrics.inc_upstream_error();
+                state.errored = true;
                 Some((Err(io::Error::other(error.to_string())), state))
             }
             None => {
                 if state.streaming && !state.done_seen {
                     state.done_seen = true;
                     Some((Ok(Bytes::from_static(b"data: [DONE]\n\n")), state))
+                } else if state.errored {
+                    metrics::record_request(
+                        &state.telemetry.worker.url,
+                        state.telemetry.policy,
+                        502,
+                    );
+                    None
                 } else {
                     let ttft = state
                         .first_chunk_after
                         .unwrap_or_else(|| state.telemetry.started.elapsed());
+                    let tokens = if state.streaming {
+                        state.tokens
+                    } else {
+                        state.completion_tokens.unwrap_or(0)
+                    };
                     state.telemetry.finish(
                         ttft,
                         state.telemetry.started.elapsed(),
                         state.upstream_prefix_hit.as_deref(),
+                        tokens,
                     );
                     None
                 }
@@ -238,6 +278,16 @@ fn chunk_contains_done(chunk: &[u8]) -> bool {
     chunk.windows(12).any(|window| window == b"data: [DONE]")
 }
 
+/// Count streamed `delta.content` events; in the mock's SSE format each event
+/// carries exactly one token.
+fn count_content_chunks(chunk: &[u8]) -> u64 {
+    const MARKER: &[u8] = b"\"content\"";
+    chunk
+        .windows(MARKER.len())
+        .filter(|window| *window == MARKER)
+        .count() as u64
+}
+
 fn prefix_hit_header(upstream: &reqwest::Response) -> Option<String> {
     upstream
         .headers()
@@ -246,22 +296,45 @@ fn prefix_hit_header(upstream: &reqwest::Response) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Build the client-facing response around an upstream body stream.
+fn completion_tokens_header(upstream: &reqwest::Response) -> Option<u64> {
+    upstream
+        .headers()
+        .get("x-completion-tokens")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+/// Build the client-facing response around an upstream body stream, forwarding
+/// the KV-hit and completion-token headers so observability tooling can read
+/// them without contacting the upstream directly.
 fn build_response(
     upstream: reqwest::Response,
     telemetry: RequestTelemetry,
     upstream_prefix_hit: Option<String>,
+    completion_tokens: Option<u64>,
     streaming: bool,
 ) -> Result<Response, ApiError> {
     let request_id = telemetry.request_id.clone();
     let worker_url = telemetry.worker.url.clone();
     let matched_blocks = telemetry.matched_prefix_blocks;
-    let stream = proxy_stream(upstream, telemetry, upstream_prefix_hit, streaming);
+    let stream = proxy_stream(
+        upstream,
+        telemetry,
+        upstream_prefix_hit.clone(),
+        completion_tokens,
+        streaming,
+    );
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header("x-request-id", request_id)
         .header("x-router-worker", worker_url)
         .header("x-router-matched-prefix", matched_blocks);
+    if let Some(hit) = upstream_prefix_hit {
+        builder = builder.header("x-kv-prefix-hit", hit);
+    }
+    if let Some(tokens) = completion_tokens {
+        builder = builder.header("x-completion-tokens", tokens);
+    }
     if streaming {
         builder = builder
             .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
@@ -305,11 +378,8 @@ pub async fn ready(State(state): State<AppState>) -> Response {
 }
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
-    let body = state.metrics.render(
-        state.registry.healthy_count(),
-        state.router.inflight().total(),
-        state.router.prefix_index().len(),
-    );
+    metrics::refresh_gauges(&state);
+    let body = state.prometheus.render();
     (
         [(
             header::CONTENT_TYPE,
@@ -332,7 +402,6 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Response, ApiE
         .await
         .map_err(|error| ApiError::upstream(worker, error.to_string()))?;
     if !upstream.status().is_success() {
-        state.metrics.inc_upstream_error();
         return Err(ApiError::upstream(
             worker,
             format!("upstream returned {}", upstream.status()),
@@ -382,9 +451,7 @@ async fn serve_proxied(
         Ok(decision) => decision,
         Err(error) => {
             warn!(request_id, %error, "no worker selected");
-            if matches!(error, RouterError::NoHealthyWorkers { .. }) {
-                state.metrics.inc_no_healthy_workers();
-            }
+            metrics::record_request("unrouted", state.router.policy(), 503);
             return Err(ApiError::from(error));
         }
     };
@@ -402,16 +469,19 @@ async fn serve_proxied(
         .json(request)
         .send()
         .await
-        .map_err(|error| ApiError::upstream(&worker, error.to_string()))?;
+        .map_err(|error| {
+            metrics::record_request(&worker.url, state.router.policy(), 502);
+            ApiError::upstream(&worker, error.to_string())
+        })?;
 
     if !upstream.status().is_success() {
-        state.metrics.inc_upstream_error();
         error!(
             request_id,
             worker = %worker.url,
             status = upstream.status().as_u16(),
             "upstream rejected request"
         );
+        metrics::record_request(&worker.url, state.router.policy(), 502);
         return Err(ApiError::upstream(
             &worker,
             format!("upstream returned {}", upstream.status()),
@@ -419,18 +489,25 @@ async fn serve_proxied(
     }
 
     let upstream_prefix_hit = prefix_hit_header(&upstream);
+    let completion_tokens = completion_tokens_header(&upstream);
     let telemetry = RequestTelemetry {
         request_id: request_id.to_string(),
         worker: worker.clone(),
         policy: state.router.policy(),
         matched_prefix_blocks: decision.matched_prefix_len,
+        prompt_blocks: decision.prompt_blocks,
         score: decision.score,
-        metrics: Arc::clone(&state.metrics),
         started,
         _guard: guard,
         details: CompletionDetails::Single,
     };
-    build_response(upstream, telemetry, upstream_prefix_hit, request.stream)
+    build_response(
+        upstream,
+        telemetry,
+        upstream_prefix_hit,
+        completion_tokens,
+        request.stream,
+    )
 }
 
 /// Two-phase routing for the `disaggregated` policy: prefill on a `prefill`
@@ -443,6 +520,7 @@ async fn serve_disaggregated(
 ) -> Result<Response, ApiError> {
     let prompt = request.canonical_prompt();
     let chain = chain_hash(&prompt, state.config.prompt_block_chars);
+    let policy = state.router.policy();
 
     // ---- prefill phase: materialize the KV cache ---------------------------
     let prefill = state
@@ -450,6 +528,7 @@ async fn serve_disaggregated(
         .select_in_pool(Pool::Prefill, &chain)
         .map_err(|error| {
             warn!(request_id, pool = "prefill", %error, "no worker selected in pool");
+            metrics::record_request("unrouted", policy, 503);
             ApiError::from(error)
         })?;
     let prefill_url = format!(
@@ -466,9 +545,12 @@ async fn serve_disaggregated(
             .header("x-router-phase", "prefill")
             .send()
             .await
-            .map_err(|error| ApiError::upstream(&prefill.worker, error.to_string()))?;
+            .map_err(|error| {
+                metrics::record_request(&prefill.worker.url, policy, 502);
+                ApiError::upstream(&prefill.worker, error.to_string())
+            })?;
         if !prefill_response.status().is_success() {
-            state.metrics.inc_upstream_error();
+            metrics::record_request(&prefill.worker.url, policy, 502);
             return Err(ApiError::upstream(
                 &prefill.worker,
                 format!("prefill phase returned {}", prefill_response.status()),
@@ -495,6 +577,7 @@ async fn serve_disaggregated(
         .select_in_pool(Pool::Decode, &chain)
         .map_err(|error| {
             warn!(request_id, pool = "decode", %error, "no worker selected in pool");
+            metrics::record_request("unrouted", policy, 503);
             ApiError::from(error)
         })?;
     let transfer_started = Instant::now();
@@ -502,11 +585,12 @@ async fn serve_disaggregated(
         .kv_transfer
         .transfer(prefill.worker.id, decode.worker.id, chain.len())
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|error| {
+            metrics::record_request(&decode.worker.url, policy, 502);
+            ApiError::from(error)
+        })?;
     let kv_transfer_ms = transfer_started.elapsed().as_millis() as u64;
-    state
-        .metrics
-        .observe_kv_transfer(Duration::from_millis(kv_transfer_ms));
+    metrics::record_kv_transfer(kv_transfer_ms as f64 / 1000.0);
 
     // ---- decode phase: what the client actually sees -----------------------
     let guard = InflightGuard::acquire(&state.router.inflight(), decode.worker.id);
@@ -522,15 +606,18 @@ async fn serve_disaggregated(
         .header("x-router-phase", "decode")
         .send()
         .await
-        .map_err(|error| ApiError::upstream(&decode.worker, error.to_string()))?;
+        .map_err(|error| {
+            metrics::record_request(&decode.worker.url, policy, 502);
+            ApiError::upstream(&decode.worker, error.to_string())
+        })?;
     if !decode_response.status().is_success() {
-        state.metrics.inc_upstream_error();
         error!(
             request_id,
             worker = %decode.worker.url,
             status = decode_response.status().as_u16(),
             "decode phase failed"
         );
+        metrics::record_request(&decode.worker.url, policy, 502);
         return Err(ApiError::upstream(
             &decode.worker,
             format!("decode phase returned {}", decode_response.status()),
@@ -538,13 +625,14 @@ async fn serve_disaggregated(
     }
 
     let upstream_prefix_hit = prefix_hit_header(&decode_response);
+    let completion_tokens = completion_tokens_header(&decode_response);
     let telemetry = RequestTelemetry {
         request_id: request_id.to_string(),
         worker: decode.worker.clone(),
-        policy: state.router.policy(),
+        policy,
         matched_prefix_blocks: decode.matched_prefix_len,
+        prompt_blocks: decode.prompt_blocks,
         score: decode.score,
-        metrics: Arc::clone(&state.metrics),
         started,
         _guard: guard,
         details: CompletionDetails::Disaggregated {
@@ -557,6 +645,7 @@ async fn serve_disaggregated(
         decode_response,
         telemetry,
         upstream_prefix_hit,
+        completion_tokens,
         request.stream,
     )
 }

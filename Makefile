@@ -1,7 +1,9 @@
 VENV := mocks/.venv
 MOCK_PY := $(VENV)/bin/python
+PY3 := $(shell command -v python3.11 || command -v python3.13 || command -v python3.12 || command -v python3)
+BENCH_PY := bench/.venv/bin/python
 
-.PHONY: fmt fmt-check lint test install-mocks run-mocks run-router
+.PHONY: fmt fmt-check lint test install-mocks run-mocks run-router bench-install bench up down
 
 fmt:
 	cargo fmt --all
@@ -25,3 +27,16 @@ run-mocks: install-mocks
 
 run-router:
 	cargo run -p router-server
+
+bench-install:
+	$(PY3) -m venv bench/.venv
+	$(BENCH_PY) -m pip install --quiet -r bench/requirements.txt
+
+bench: bench-install
+	$(BENCH_PY) bench/ab.py --reset
+
+up:
+	docker compose up -d --build
+
+down:
+	docker compose down

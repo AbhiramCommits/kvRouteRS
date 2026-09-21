@@ -30,9 +30,6 @@ pub fn spawn_health_poller(state: AppState) {
                         false
                     }
                 };
-                if !healthy {
-                    state.metrics.inc_health_check_failure();
-                }
                 if state.registry.set_healthy(worker.id, healthy) {
                     info!(worker = %worker.url, healthy, "worker health state changed");
                     if !healthy {

@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: kvrouter
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - router-round-robin:8080
+          - router-cache-aware:8080
+          - router-disaggregated:8080

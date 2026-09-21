@@ -1,183 +1,114 @@
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
+//! `kvrouter_*` metrics, recorded through the `metrics` crate facade and
+//! rendered by `metrics-exporter-prometheus` at `GET /metrics`.
+//!
+//! Histograms use the crate's dynamic log-scale buckets, which span (and
+//! exceed) the 10ms–10s range the TTFT and duration histograms care about.
+//! Counters are cumulative; hit rate is derived as
+//! `rate(kvrouter_cache_hit_blocks) / rate(kvrouter_prompt_blocks_total)`.
+
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 
 use router_core::RoutingPolicy;
 
-/// Hand-rolled Prometheus text exposition, backed by atomics plus one mutex for
-/// the labeled request counter.
-///
-/// Deliberately avoids the `prometheus` crate: the router exposes a handful of
-/// counters and gauges, and plain atomics are trivially safe to update from
-/// the request hot path without a global registry.
-#[derive(Debug, Default)]
-pub struct Metrics {
-    requests_by_policy: Mutex<BTreeMap<String, u64>>,
-    upstream_errors: AtomicU64,
-    no_healthy_workers: AtomicU64,
-    health_check_failures: AtomicU64,
-    ttft_micros_sum: AtomicU64,
-    ttft_count: AtomicU64,
-    total_micros_sum: AtomicU64,
-    total_count: AtomicU64,
-    kv_transfers_total: AtomicU64,
-    kv_transfer_micros_sum: AtomicU64,
-    kv_transfer_count: AtomicU64,
+use crate::state::AppState;
+
+/// Register HELP text for every metric. Must run once after the recorder is
+/// installed.
+pub fn register_descriptions() {
+    describe_counter!(
+        "kvrouter_requests_total",
+        "Chat completion requests by worker, policy and status."
+    );
+    describe_counter!(
+        "kvrouter_cache_hit_blocks",
+        "Cache-hit blocks credited to routing decisions (matched prefix length)."
+    );
+    describe_counter!(
+        "kvrouter_prompt_blocks_total",
+        "Prompt blocks across routed requests."
+    );
+    describe_histogram!("kvrouter_ttft_seconds", "Time to first token, seconds.");
+    describe_histogram!(
+        "kvrouter_request_duration_seconds",
+        "End-to-end request duration, seconds."
+    );
+    describe_counter!(
+        "kvrouter_tokens_generated_total",
+        "Tokens streamed back to clients, counted from streamed chunks."
+    );
+    describe_gauge!(
+        "kvrouter_inflight_requests",
+        "Requests currently in flight, per worker."
+    );
+    describe_gauge!(
+        "kvrouter_prefix_index_entries",
+        "Router-side prefix index size."
+    );
+    describe_gauge!(
+        "kvrouter_worker_up",
+        "1 if the worker is currently healthy."
+    );
+    describe_histogram!(
+        "kvrouter_kv_transfer_seconds",
+        "KV transfer duration between prefill and decode workers (disaggregated mode)."
+    );
 }
 
-impl Metrics {
-    pub fn observe_request(&self, policy: RoutingPolicy, ttft: Duration, total: Duration) {
-        if let Ok(mut by_policy) = self.requests_by_policy.lock() {
-            *by_policy.entry(policy.to_string()).or_insert(0) += 1;
-        }
-        self.ttft_micros_sum
-            .fetch_add(micros(ttft), Ordering::Relaxed);
-        self.ttft_count.fetch_add(1, Ordering::Relaxed);
-        self.total_micros_sum
-            .fetch_add(micros(total), Ordering::Relaxed);
-        self.total_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Record a (simulated) KV transfer between the two disaggregated phases.
-    pub fn observe_kv_transfer(&self, duration: Duration) {
-        self.kv_transfers_total.fetch_add(1, Ordering::Relaxed);
-        self.kv_transfer_micros_sum
-            .fetch_add(micros(duration), Ordering::Relaxed);
-        self.kv_transfer_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn inc_upstream_error(&self) {
-        self.upstream_errors.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn inc_no_healthy_workers(&self) {
-        self.no_healthy_workers.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn inc_health_check_failure(&self) {
-        self.health_check_failures.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Render the full exposition format, with the live gauges.
-    pub fn render(
-        &self,
-        healthy_workers: usize,
-        inflight_requests: u64,
-        index_entries: usize,
-    ) -> String {
-        let mut out = String::new();
-        let by_policy = self
-            .requests_by_policy
-            .lock()
-            .map(|entries| entries.clone())
-            .unwrap_or_default();
-        counter(
-            &mut out,
-            "router_requests_total",
-            "Chat completion requests routed.",
-            &by_policy,
-        );
-        plain_counter(
-            &mut out,
-            "router_upstream_errors_total",
-            "Requests that failed at the upstream worker.",
-            self.upstream_errors.load(Ordering::Relaxed),
-        );
-        plain_counter(
-            &mut out,
-            "router_no_healthy_workers_total",
-            "Requests rejected because no healthy worker was available.",
-            self.no_healthy_workers.load(Ordering::Relaxed),
-        );
-        plain_counter(
-            &mut out,
-            "router_health_check_failures_total",
-            "Failed worker health probes.",
-            self.health_check_failures.load(Ordering::Relaxed),
-        );
-        seconds_counter(
-            &mut out,
-            "router_ttft_seconds",
-            "Time-to-first-token for routed requests.",
-            self.ttft_micros_sum.load(Ordering::Relaxed),
-            self.ttft_count.load(Ordering::Relaxed),
-        );
-        seconds_counter(
-            &mut out,
-            "router_request_latency_seconds",
-            "End-to-end latency for routed requests.",
-            self.total_micros_sum.load(Ordering::Relaxed),
-            self.total_count.load(Ordering::Relaxed),
-        );
-        plain_counter(
-            &mut out,
-            "router_kv_transfers_total",
-            "KV transfers between prefill and decode workers.",
-            self.kv_transfers_total.load(Ordering::Relaxed),
-        );
-        seconds_counter(
-            &mut out,
-            "router_kv_transfer_seconds",
-            "KV transfer time (simulated).",
-            self.kv_transfer_micros_sum.load(Ordering::Relaxed),
-            self.kv_transfer_count.load(Ordering::Relaxed),
-        );
-        gauge(
-            &mut out,
-            "router_healthy_workers",
-            "Workers currently marked healthy.",
-            healthy_workers,
-        );
-        gauge(
-            &mut out,
-            "router_inflight_requests",
-            "Requests currently being proxied.",
-            inflight_requests as usize,
-        );
-        gauge(
-            &mut out,
-            "router_prefix_index_entries",
-            "Entries in the router-side prefix index.",
-            index_entries,
-        );
-        out
-    }
+pub fn record_request(worker: &str, policy: RoutingPolicy, status: u16) {
+    counter!(
+        "kvrouter_requests_total",
+        "worker" => worker.to_owned(),
+        "policy" => policy.to_string(),
+        "status" => status.to_string()
+    )
+    .increment(1);
 }
 
-fn micros(duration: Duration) -> u64 {
-    duration.as_micros() as u64
+pub fn record_cache_hit_blocks(blocks: u64) {
+    counter!("kvrouter_cache_hit_blocks").increment(blocks);
 }
 
-fn counter(out: &mut String, name: &str, help: &str, labeled: &BTreeMap<String, u64>) {
-    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
-    if labeled.is_empty() {
-        out.push_str(&format!("{name} 0\n"));
-    } else {
-        for (label, value) in labeled {
-            out.push_str(&format!("{name}{{policy=\"{label}\"}} {value}\n"));
-        }
+pub fn record_prompt_blocks(blocks: u64) {
+    counter!("kvrouter_prompt_blocks_total").increment(blocks);
+}
+
+pub fn record_ttft(policy: RoutingPolicy, seconds: f64) {
+    histogram!("kvrouter_ttft_seconds", "policy" => policy.to_string()).record(seconds);
+}
+
+pub fn record_request_duration(policy: RoutingPolicy, seconds: f64) {
+    histogram!("kvrouter_request_duration_seconds", "policy" => policy.to_string()).record(seconds);
+}
+
+pub fn record_tokens_generated(worker: &str, tokens: u64) {
+    counter!("kvrouter_tokens_generated_total", "worker" => worker.to_owned()).increment(tokens);
+}
+
+pub fn record_kv_transfer(seconds: f64) {
+    histogram!("kvrouter_kv_transfer_seconds").record(seconds);
+}
+
+pub fn set_inflight(worker: &str, count: u64) {
+    gauge!("kvrouter_inflight_requests", "worker" => worker.to_owned()).set(count as f64);
+}
+
+pub fn set_prefix_index_entries(entries: u64) {
+    gauge!("kvrouter_prefix_index_entries").set(entries as f64);
+}
+
+pub fn set_worker_up(worker: &str, up: bool) {
+    gauge!("kvrouter_worker_up", "worker" => worker.to_owned()).set(if up { 1.0 } else { 0.0 });
+}
+
+/// Re-derive live gauges from their sources right before a scrape: worker
+/// health from the registry, in-flight counts from the tracker, and index size
+/// from the prefix index. Gauges are otherwise only written on transitions,
+/// which would make them lag reality between scrapes.
+pub fn refresh_gauges(state: &AppState) {
+    for worker in state.registry.all_workers() {
+        let healthy = state.registry.is_healthy(worker.id);
+        set_worker_up(&worker.url, healthy);
+        set_inflight(&worker.url, state.router.inflight().count(worker.id));
     }
-}
-
-fn plain_counter(out: &mut String, name: &str, help: &str, value: u64) {
-    out.push_str(&format!(
-        "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
-    ));
-}
-
-fn seconds_counter(out: &mut String, name: &str, help: &str, micros_sum: u64, count: u64) {
-    out.push_str(&format!(
-        "# HELP {name}_sum {help} (sum, seconds)\n# TYPE {name}_sum counter\n{name}_sum {}\n",
-        micros_sum as f64 / 1_000_000.0
-    ));
-    out.push_str(&format!(
-        "# HELP {name}_count {help} (count)\n# TYPE {name}_count counter\n{name}_count {count}\n"
-    ));
-}
-
-fn gauge(out: &mut String, name: &str, help: &str, value: usize) {
-    out.push_str(&format!(
-        "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
-    ));
+    set_prefix_index_entries(state.router.prefix_index().len() as u64);
 }

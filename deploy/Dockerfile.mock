@@ -1,0 +1,7 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY mocks/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY mocks/mock_vllm.py ./
+EXPOSE 8001
+CMD ["sh", "-c", "exec python mock_vllm.py"]
