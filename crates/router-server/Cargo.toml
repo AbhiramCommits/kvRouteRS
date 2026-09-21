@@ -18,3 +18,11 @@ futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
+kube = { version = "0.98", default-features = false, features = ["client", "runtime", "rustls-tls"] }
+# Must match the k8s-openapi version kube depends on (0.24) so the v1_30
+# feature unifies onto a single build.
+k8s-openapi = { version = "0.24", features = ["v1_30"] }
+# kube's rustls-tls does not enable a crypto provider; reqwest enables
+# aws-lc-rs on the same rustls build. Pinning our side to aws_lc_rs too keeps
+# exactly one provider feature enabled, and serve() installs it explicitly.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }

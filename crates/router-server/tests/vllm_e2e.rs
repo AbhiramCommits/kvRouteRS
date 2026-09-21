@@ -91,6 +91,7 @@ async fn predicted_hit_rate_tracks_vllm() {
         metrics_scrape: false,
         engine_metrics_interval_secs: 15,
         engine_cache_hit_metric: "vllm:gpu_prefix_cache_hit_rate".to_string(),
+        discovery: router_core::DiscoveryConfig::default(),
     };
     let registry = Arc::new(WorkerRegistry::from_config(&config.workers));
     registry.set_healthy(0, true);

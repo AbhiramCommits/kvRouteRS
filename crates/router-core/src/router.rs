@@ -287,6 +287,7 @@ mod tests {
             metrics_scrape: false,
             engine_metrics_interval_secs: 15,
             engine_cache_hit_metric: "vllm:gpu_prefix_cache_hit_rate".to_string(),
+            discovery: crate::DiscoveryConfig::default(),
         };
         let registry = Arc::new(WorkerRegistry::from_config(&config.workers));
         for id in healthy {

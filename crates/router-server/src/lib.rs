@@ -2,6 +2,7 @@
 //! the real-engine e2e test) can drive the router in-process.
 
 pub mod api;
+pub mod discovery;
 pub mod engine_metrics;
 pub mod health;
 pub mod metrics;
@@ -31,6 +32,11 @@ pub async fn serve() -> Result<(), Box<dyn Error>> {
         )
         .init();
 
+    // The kube client (worker discovery) relies on rustls' process-level
+    // default crypto provider; install it explicitly and deterministically
+    // instead of depending on feature-driven auto-selection.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let config_path = std::env::var("ROUTER_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
@@ -51,6 +57,9 @@ pub async fn serve() -> Result<(), Box<dyn Error>> {
     let state = state::AppState::new(config.clone())?;
     health::spawn_health_poller(state.clone());
     engine_metrics::spawn_engine_metrics_scraper(state.clone());
+    if state.config.discovery.enabled {
+        discovery::spawn_worker_discovery(state.clone());
+    }
     // Bounded prefix index: TTL expiry + LRU cap, applied on a detached
     // background task so the request path never pays eviction cost.
     PrefixIndex::spawn_eviction_task(

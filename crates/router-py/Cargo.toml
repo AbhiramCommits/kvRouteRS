@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 router-core = { workspace = true }
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 
 [build-dependencies]
-pyo3-build-config = "0.23"
+pyo3-build-config = "0.29"

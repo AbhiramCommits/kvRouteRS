@@ -19,7 +19,7 @@ pub mod request;
 pub mod router;
 pub mod worker;
 
-pub use config::{Pool, RouterConfig, RoutingPolicy, WorkerConfig};
+pub use config::{DiscoveryConfig, Pool, RouterConfig, RoutingPolicy, WorkerConfig};
 pub use error::RouterError;
 pub use hashing::chain_hash;
 pub use inflight::{InflightGuard, InflightTracker};

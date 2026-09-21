@@ -1,0 +1,11 @@
+target
+.git
+.gitignore
+mocks/.venv
+bench/.venv
+bench/results
+python/.venv
+python/**/__pycache__
+**/__pycache__
+.DS_Store
+deploy/k8s

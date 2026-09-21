@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kvrouter-router
+  labels:
+    app: kvrouter-router
+spec:
+  selector:
+    app: kvrouter-router
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

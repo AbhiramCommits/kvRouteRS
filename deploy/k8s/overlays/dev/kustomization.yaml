@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kvrouters
+
+resources:
+  - ../../base
+  - workers-statefulset.yaml
+  - workers-headless-service.yaml
+
+# Router config for local/dev: mock backends, discovered live from the
+# headless service (no static worker list — the in-cluster watch owns the
+# registry).
+configMapGenerator:
+  - name: kvrouters-config
+    files:
+      - router.yaml
+
+images:
+  - name: ghcr.io/kvrouters/router
+    newName: kvrouter
+    newTag: dev
+  - name: kvrouter-mock
+    newTag: dev

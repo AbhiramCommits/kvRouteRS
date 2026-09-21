@@ -1,0 +1,48 @@
+# Mock-vLLM workers for local/dev clusters without GPUs. A StatefulSet (not a
+# Deployment) so worker identity is stable: the router's prefix index is keyed
+# to worker identity, and a pod that comes back under a new name is a
+# *different* worker whose cache affinity starts empty.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kvrouter-workers
+  labels:
+    app: kvrouter-workers
+spec:
+  serviceName: kvrouter-workers
+  replicas: 4
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: kvrouter-workers
+  template:
+    metadata:
+      labels:
+        app: kvrouter-workers
+    spec:
+      containers:
+        - name: mock-vllm
+          image: kvrouter-mock:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MOCK_PORT
+              value: "8001"
+            # Small block cache so cache-residency effects are measurable,
+            # mirroring the docker-compose benchmark setup.
+            - name: MOCK_PREFIX_CAP
+              value: "80"
+          ports:
+            - name: http
+              containerPort: 8001
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3

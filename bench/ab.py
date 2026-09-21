@@ -312,6 +312,13 @@ async def main():
     parser.add_argument("--skip-sweep", action="store_true")
     parser.add_argument("--router-binary", default=None)
     parser.add_argument("--outdir", default="bench/results")
+    parser.add_argument(
+        "--min-shared-prefix-hit-rate",
+        type=float,
+        default=None,
+        help="fail (exit 1) if cache_aware hit rate on the shared_prefix trace \
+              drops below this committed threshold",
+    )
     args = parser.parse_args()
 
     outdir = Path(args.outdir)
@@ -328,6 +335,21 @@ async def main():
     for shape in SHAPES:
         print()
         print(render_table(results, shape))
+
+    if args.min_shared_prefix_hit_rate is not None:
+        rate = results[("shared_prefix", "cache_aware")]["hit_rate_router"]
+        threshold = args.min_shared_prefix_hit_rate
+        print(
+            f"\ncache_aware shared_prefix hit rate: {rate:.3f} "
+            f"(committed threshold: {threshold:.3f})"
+        )
+        if rate < threshold:
+            print(
+                f"FAIL: cache-aware routing regressed below the committed "
+                f"threshold ({rate:.3f} < {threshold:.3f})",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
     save_results(outdir, results, sweep)
     render_charts(outdir, results, sweep)

@@ -1,0 +1,87 @@
+name: Benchmark
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  bench:
+    name: A/B benchmark (round_robin vs cache_aware vs disaggregated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install bench deps
+        run: pip install -r bench/requirements.txt
+      - name: Bring up mocks and routers
+        run: docker compose up -d --build
+      - name: Wait for the routers
+        run: |
+          for port in 18080 18081 18082; do
+            for i in $(seq 1 60); do
+              if curl -fsS "http://127.0.0.1:$port/ready" > /dev/null; then break; fi
+              sleep 3
+            done
+            curl -fsS "http://127.0.0.1:$port/ready" > /dev/null
+          done
+      - name: Run the A/B benchmark
+        # The committed threshold turns the routing win into a CI-enforced
+        # invariant: if cache-aware routing ever regresses below this hit rate
+        # on the shared_prefix trace, the job fails.
+        run: |
+          python bench/ab.py \
+            --skip-sweep \
+            --reset \
+            --requests 344 \
+            --prefixes 43 \
+            --rate 10 \
+            --min-shared-prefix-hit-rate 0.55 \
+            --outdir bench/results
+      - name: Post the comparison table as a PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('bench/results/report.md', 'utf8');
+            const results = JSON.parse(fs.readFileSync('bench/results/ab_results.json', 'utf8'));
+            const ca = results.results['shared_prefix/cache_aware'];
+            const marker = '<!-- kvrouter-benchmark -->';
+            const body = `## kvRouteRS benchmark (${new Date().toISOString()})\n\n${report}\n\n` +
+              `cache_aware hit rate on shared_prefix: **${ca.hit_rate_router.toFixed(3)}** ` +
+              `(engine: ${ca.hit_rate_engine.toFixed(3)}), committed threshold: **0.55**\n\n${marker}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const previous = comments.find((c) => c.body && c.body.includes(marker));
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            bench/results/report.md
+            bench/results/ab_results.json
+            bench/results/*.png

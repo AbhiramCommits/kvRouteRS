@@ -59,6 +59,34 @@ pub struct WorkerConfig {
     pub pool: Pool,
 }
 
+/// Kubernetes worker discovery: instead of a static worker list, watch the
+/// EndpointSlices of a headless service and add/remove workers live.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DiscoveryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Name of the headless service backing the workers.
+    #[serde(default = "default_discovery_service")]
+    pub service: String,
+    /// Namespace containing the service; defaults to the in-cluster namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service: default_discovery_service(),
+            namespace: None,
+        }
+    }
+}
+
+fn default_discovery_service() -> String {
+    "kvrouter-workers".to_string()
+}
+
 /// Top-level router configuration.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RouterConfig {
@@ -101,6 +129,11 @@ pub struct RouterConfig {
     /// SGLang builds vary, so check `/metrics` on your build.
     #[serde(default = "default_engine_cache_hit_metric")]
     pub engine_cache_hit_metric: String,
+    /// Live worker discovery from a Kubernetes headless service. When enabled,
+    /// `workers` may be empty: the discovered set replaces it at runtime, and
+    /// the static list only acts as the fallback when not running in-cluster.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
 }
 
 fn default_health_check_interval_secs() -> u64 {
@@ -151,9 +184,11 @@ impl RouterConfig {
     /// Parse configuration from YAML text.
     pub fn from_yaml(raw: &str) -> Result<Self, RouterError> {
         let config: RouterConfig = serde_yaml::from_str(raw)?;
-        if config.workers.is_empty() {
+        if config.workers.is_empty() && !config.discovery.enabled {
             return Err(RouterError::Config(
-                "`workers` must contain at least one entry".to_string(),
+                "`workers` must contain at least one entry, or enable `discovery` \
+                 to populate workers from Kubernetes"
+                    .to_string(),
             ));
         }
         Ok(config)
@@ -239,5 +274,24 @@ workers:
         let error =
             RouterConfig::from_yaml("routing_policy: round_robin\nworkers: []\n").unwrap_err();
         assert!(matches!(error, RouterError::Config(_)));
+    }
+
+    #[test]
+    fn accepts_empty_workers_when_discovery_is_enabled() {
+        let config = RouterConfig::from_yaml(
+            "routing_policy: cache_aware\n\
+             discovery:\n  enabled: true\n  service: kvrouter-workers\n\
+             workers: []\n",
+        )
+        .unwrap();
+        assert!(config.workers.is_empty());
+        assert!(config.discovery.enabled);
+        assert_eq!(config.discovery.service, "kvrouter-workers");
+    }
+
+    #[test]
+    fn discovery_defaults_to_disabled() {
+        let config = RouterConfig::from_yaml(CONFIG).unwrap();
+        assert!(!config.discovery.enabled);
     }
 }

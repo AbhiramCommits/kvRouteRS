@@ -1,0 +1,69 @@
+# vLLM workers on GPU nodes.
+#
+# A StatefulSet (not a Deployment) matters here, and this is the single most
+# important identity constraint in this file: the router's prefix index is
+# keyed to worker identity. With a StatefulSet, pod `kvrouter-workers-1` that
+# restarts comes back as `kvrouter-workers-1` with the same DNS record through
+# the headless service, and its model-cache volume survives. The router keeps
+# crediting the same identity, and engine-side cache affinity lines up with
+# the router's belief index. With a Deployment, the pod would come back under
+# a new name/IP; the router would purge the old identity's prefix entries and
+# the engine's surviving KV cache would go to waste — worse, until purged,
+# the old entries would mis-route traffic to a cache that no longer exists.
+#
+# startupProbe with a long window: model loading (and first-time weights
+# download into the model-cache volume) routinely takes many minutes.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kvrouter-workers
+  labels:
+    app: kvrouter-workers
+spec:
+  serviceName: kvrouter-workers
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: kvrouter-workers
+  template:
+    metadata:
+      labels:
+        app: kvrouter-workers
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.6.4.post1
+          args:
+            - --model
+            - Qwen/Qwen2.5-0.5B-Instruct
+            - --port
+            - "8001"
+            - --enable-prefix-caching
+            - --max-model-len
+            - "8192"
+          ports:
+            - name: http
+              containerPort: 8001
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 90 # up to ~15 minutes for model load
+  volumeClaimTemplates:
+    - metadata:
+        name: model-cache
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

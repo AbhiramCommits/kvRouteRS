@@ -1,0 +1,17 @@
+# Headless service: no cluster IP, each pod gets a stable DNS record
+# (kvrouter-workers-0, -1, ...). The router discovers workers by watching the
+# EndpointSlices of this service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kvrouter-workers
+  labels:
+    app: kvrouter-workers
+spec:
+  clusterIP: None
+  selector:
+    app: kvrouter-workers
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http

@@ -1,0 +1,16 @@
+# Scraped by the Prometheus Operator. Adjust the `release` label to match
+# your operator's serviceMonitorSelector.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kvrouter-router
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: kvrouter-router
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

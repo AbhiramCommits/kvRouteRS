@@ -109,7 +109,7 @@ impl PyPrefixIndex {
         let workers = &self.workers;
         let block_size = self.block_size;
         // GIL released: hashing + shard-lock writes, see the module docs.
-        py.allow_threads(move || {
+        py.detach(move || {
             let chain = chain_hash(&prompt, block_size);
             inner.record(worker_id, &chain);
             workers
@@ -125,7 +125,7 @@ impl PyPrefixIndex {
         let inner = Arc::clone(&self.inner);
         let workers = &self.workers;
         let block_size = self.block_size;
-        py.allow_threads(move || {
+        py.detach(move || {
             let chain = chain_hash(&prompt, block_size);
             let worker_ids: Vec<u64> = workers
                 .lock()
@@ -147,7 +147,7 @@ impl PyPrefixIndex {
         let inner = Arc::clone(&self.inner);
         let ttl = self.ttl;
         let max_entries = self.max_entries;
-        py.allow_threads(move || {
+        py.detach(move || {
             let stats = inner.evict(ttl, max_entries);
             (stats.expired, stats.lru_evicted)
         })
@@ -155,7 +155,7 @@ impl PyPrefixIndex {
 
     fn __len__(&self, py: Python<'_>) -> usize {
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.len())
+        py.detach(move || inner.len())
     }
 }
 
@@ -229,6 +229,7 @@ impl PyRouter {
             metrics_scrape: false,
             engine_metrics_interval_secs: 15,
             engine_cache_hit_metric: "vllm:gpu_prefix_cache_hit_rate".to_string(),
+            discovery: router_core::DiscoveryConfig::default(),
         };
         let registry = Arc::new(WorkerRegistry::from_config(&config.workers));
         // In-process there is no health poller: treat every configured worker
@@ -283,13 +284,13 @@ impl PyRouter {
             extra: Default::default(),
         };
         // GIL released: canonical-prompt hashing, shard locks, scoring.
-        py.allow_threads(move || router.select_for_chat(&request))
+        py.detach(move || router.select_for_chat(&request))
             .map_err(to_py_error)
     }
 }
 
 /// The outcome of one routing decision.
-#[pyclass(name = "RouteDecision", module = "kvrouters")]
+#[pyclass(name = "RouteDecision", module = "kvrouters", skip_from_py_object)]
 #[derive(Clone)]
 struct PyRouteDecision {
     #[pyo3(get)]

@@ -1,0 +1,30 @@
+# The router needs read access to EndpointSlices to discover workers from the
+# headless service. Least privilege: one Role scoped to this namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kvrouter-router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kvrouter-router
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kvrouter-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kvrouter-router
+subjects:
+  - kind: ServiceAccount
+    name: kvrouter-router

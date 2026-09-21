@@ -1,0 +1,23 @@
+routing_policy: cache_aware
+health_check_interval_secs: 2
+
+prompt_block_chars: 512
+cache_weight: 1.0
+load_weight: 0.5
+
+prefix_index_ttl_secs: 300
+prefix_index_max_entries: 100000
+
+kv_transfer_cost_ms: 20
+
+# Mock backends expose no engine metrics.
+metrics_scrape: false
+engine_metrics_interval_secs: 15
+engine_cache_hit_metric: "vllm:gpu_prefix_cache_hit_rate"
+
+# Workers are discovered from the headless service in-cluster; the empty
+# static list acts only as the not-in-cluster fallback.
+discovery:
+  enabled: true
+  service: kvrouter-workers
+workers: []

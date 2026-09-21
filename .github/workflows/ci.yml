@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      - name: Licenses and advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  python:
+    name: Python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build and test deps
+        run: pip install maturin pytest httpx
+      - name: Build and install the bindings
+        run: maturin develop --manifest-path crates/router-py/Cargo.toml
+      - name: Run the pytest suite
+        run: pytest python/tests -q
+      - name: Validate the wheel builds
+        run: maturin build --release --manifest-path crates/router-py/Cargo.toml
+
+  kind-smoke:
+    name: kind smoke (dev overlay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build router image
+        run: docker build -t kvrouter:dev -f deploy/Dockerfile.router .
+      - name: Build mock image
+        run: docker build -t kvrouter-mock:dev -f deploy/Dockerfile.mock .
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kvrouters
+      - name: Load images into kind
+        run: |
+          kind load docker-image kvrouter:dev --name kvrouters
+          kind load docker-image kvrouter-mock:dev --name kvrouters
+      - uses: azure/setup-kubectl@v4
+      - name: Render manifests (validates both overlays)
+        run: |
+          kubectl kustomize deploy/k8s/overlays/dev > /dev/null
+          kubectl kustomize deploy/k8s/overlays/gpu > /dev/null
+      - name: Apply dev overlay
+        run: kubectl apply -k deploy/k8s/overlays/dev
+      - name: Wait for router rollout
+        run: kubectl -n kvrouters rollout status deployment/kvrouter-router --timeout=240s
+      - name: Wait for mock workers
+        run: kubectl -n kvrouters rollout status statefulset/kvrouter-workers --timeout=120s
+      - name: Smoke test through a port-forward
+        run: |
+          kubectl -n kvrouters port-forward svc/kvrouter-router 8080:8080 &
+          PORT_FORWARD_PID=$!
+          trap "kill $PORT_FORWARD_PID" EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/ready > /dev/null; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/health
+          curl -fsS http://127.0.0.1:8080/ready
+          curl -fsS -X POST http://127.0.0.1:8080/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"mock-vllm","messages":[{"role":"user","content":"k8s smoke test"}],"max_tokens":8}'
+          curl -fsSN -X POST http://127.0.0.1:8080/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"mock-vllm","messages":[{"role":"user","content":"k8s smoke test"}],"max_tokens":4,"stream":true}' \
+            | grep -q "data: \[DONE\]"
+          echo "kind smoke test passed"

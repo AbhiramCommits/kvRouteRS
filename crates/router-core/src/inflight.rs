@@ -1,28 +1,46 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::worker::WorkerId;
 
 /// Lock-free per-worker in-flight request counts.
 ///
 /// Worker ids are dense `0..n` by construction ([`WorkerRegistry::from_config`]
-/// assigns them in configuration order), so a `Vec<AtomicU64>` gives us a fully
-/// lock-free tracker the routing hot path can read without contention.
+/// assigns them in configuration order), so a `Vec<AtomicU64>` gives index-free
+/// lookups. Reads take a cheap, uncontended `RwLock` read guard around the vec
+/// (so runtime-registered workers can resize it); the rare write guard is only
+/// taken by `ensure_capacity` when Kubernetes discovery adds workers.
 #[derive(Debug)]
 pub struct InflightTracker {
-    counts: Vec<AtomicU64>,
+    counts: RwLock<Vec<AtomicU64>>,
 }
 
 impl InflightTracker {
     pub fn with_capacity(workers: usize) -> Self {
         Self {
-            counts: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+            counts: RwLock::new((0..workers).map(|_| AtomicU64::new(0)).collect()),
+        }
+    }
+
+    /// Grow the backing storage so counts up to `workers` are tracked. Used by
+    /// worker discovery before registering freshly discovered workers.
+    pub fn ensure_capacity(&self, workers: usize) {
+        let mut counts = self
+            .counts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if counts.len() < workers {
+            counts.resize_with(workers, || AtomicU64::new(0));
         }
     }
 
     /// In-flight requests currently being served by `worker`.
     pub fn count(&self, worker: WorkerId) -> u64 {
-        self.counts
+        let counts = self
+            .counts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        counts
             .get(worker as usize)
             .map(|count| count.load(Ordering::Relaxed))
             .unwrap_or(0)
@@ -30,20 +48,32 @@ impl InflightTracker {
 
     /// Total in-flight requests across all workers (for the metrics gauge).
     pub fn total(&self) -> u64 {
-        self.counts
+        let counts = self
+            .counts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        counts
             .iter()
             .map(|count| count.load(Ordering::Relaxed))
             .sum()
     }
 
     fn increment(&self, worker: WorkerId) {
-        if let Some(count) = self.counts.get(worker as usize) {
+        let counts = self
+            .counts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = counts.get(worker as usize) {
             count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     fn decrement(&self, worker: WorkerId) {
-        if let Some(count) = self.counts.get(worker as usize) {
+        let counts = self
+            .counts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = counts.get(worker as usize) {
             count.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -97,6 +127,18 @@ mod tests {
         assert_eq!(guard.worker(), 0);
         drop(guard);
         assert_eq!(tracker.count(0), 0);
+        assert_eq!(tracker.total(), 0);
+    }
+
+    #[test]
+    fn ensure_capacity_tracks_runtime_workers() {
+        let tracker = Arc::new(InflightTracker::with_capacity(2));
+        assert_eq!(tracker.count(5), 0);
+        tracker.ensure_capacity(6);
+        let guard = InflightGuard::acquire(&tracker, 5);
+        assert_eq!(tracker.count(5), 1);
+        assert_eq!(tracker.total(), 1);
+        drop(guard);
         assert_eq!(tracker.total(), 0);
     }
 

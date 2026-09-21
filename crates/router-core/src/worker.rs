@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use crate::{Pool, WorkerConfig};
@@ -39,6 +40,10 @@ pub struct WorkerState {
 #[derive(Debug, Default)]
 pub struct WorkerRegistry {
     workers: RwLock<HashMap<WorkerId, WorkerState>>,
+    /// Monotonic id allocator for runtime-registered workers. Ids are never
+    /// reused: a replacement worker must never inherit the cache affinity
+    /// (or in-flight accounting) keyed to a removed one.
+    next_id: AtomicU64,
 }
 
 impl WorkerRegistry {
@@ -66,7 +71,33 @@ impl WorkerRegistry {
             .collect();
         Self {
             workers: RwLock::new(entries),
+            next_id: AtomicU64::new(workers.len() as u64),
         }
+    }
+
+    /// Register a worker discovered at runtime (Kubernetes discovery) and
+    /// return its freshly allocated id. Starts unhealthy until the poller
+    /// marks it up.
+    pub fn register_worker(&self, url: String, pool: Pool) -> WorkerId {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.workers.write().unwrap_or_else(|p| p.into_inner());
+        let worker = Worker { id, url, pool };
+        guard.insert(
+            id,
+            WorkerState {
+                worker: worker.clone(),
+                healthy: false,
+            },
+        );
+        id
+    }
+
+    /// Remove a worker entirely (its endpoints disappeared). Callers are
+    /// responsible for purging the worker from the prefix index: its KV cache
+    /// died with the pod, and a replacement pod must not inherit its affinity.
+    pub fn remove_worker(&self, id: WorkerId) -> Option<Worker> {
+        let mut guard = self.workers.write().unwrap_or_else(|p| p.into_inner());
+        guard.remove(&id).map(|state| state.worker)
     }
 
     /// Update a worker's health state. Returns `true` if the state actually changed.
@@ -167,5 +198,26 @@ mod tests {
         let registry = WorkerRegistry::from_config(&two_workers());
         assert!(!registry.set_healthy(42, true));
         assert!(registry.get(42).is_none());
+    }
+
+    #[test]
+    fn registers_and_removes_runtime_workers() {
+        let registry = WorkerRegistry::from_config(&two_workers());
+        let id = registry.register_worker("http://discovered".to_string(), Pool::Both);
+        assert_eq!(id, 2);
+        assert_eq!(registry.all_workers().len(), 3);
+        assert!(!registry.is_healthy(id));
+
+        registry.set_healthy(id, true);
+        assert!(registry.is_healthy(id));
+
+        let removed = registry.remove_worker(id);
+        assert_eq!(removed.unwrap().url, "http://discovered");
+        assert_eq!(registry.all_workers().len(), 2);
+
+        // Ids are not reused: a replacement worker must never inherit the
+        // cache affinity keyed to the removed one.
+        let next = registry.register_worker("http://replacement".to_string(), Pool::Both);
+        assert_eq!(next, 3);
     }
 }

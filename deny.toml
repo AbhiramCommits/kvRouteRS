@@ -1,0 +1,40 @@
+[advisories]
+version = 2
+# Deny unmaintained crates only for the workspace itself; transitive
+# unmaintained crates (kube's backoff/instant/rustls-pemfile) carry no known
+# vulnerabilities and are load-bearing — they warn, not fail.
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+exceptions = [
+    # ring and friends are dual ISC + OpenSSL + MIT.
+    { allow = ["ISC", "OpenSSL", "MIT"], crate = "ring" },
+    { allow = ["ISC"], crate = "untrusted" },
+]
+
+[bans]
+multiple-versions = "warn"
+# cargo-deny 0.20 misreports version-less `workspace = true` path dependencies
+# as wildcards; keep this at warn so real wildcard drift is still surfaced
+# without failing on the workspace layout itself.
+wildcards = "warn"
+deny = []
+
+[bans.workspace-dependencies]
+duplicates = "allow"
+
+[sources]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

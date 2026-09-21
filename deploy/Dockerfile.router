@@ -1,13 +1,41 @@
-FROM rust:1.85-slim AS builder
-WORKDIR /build
-COPY Cargo.toml Cargo.lock rustfmt.toml clippy.toml ./
-COPY crates crates
-RUN cargo build --release -p router-server
-
-FROM debian:bookworm-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+# syntax=docker/dockerfile:1
+# Multi-stage build: cargo-chef for dependency caching, rust:1-bookworm for
+# the build, distroless static-debian12 as the runtime (non-root). The binary
+# is statically linked against musl, which is what keeps the final image well
+# under 50MB: glibc distroless bases alone are ~43MB, static is ~3MB.
+#
+# Multi-arch: buildx builds each platform natively (QEMU or real hardware), so
+# `musl-tools` provides the correct musl-gcc for whatever arch the build runs
+# on; no cross toolchain is needed.
+FROM rust:1-bookworm AS chef
+RUN cargo install cargo-chef --locked \
+    && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends musl-tools \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/router-server /usr/local/bin/router-server
+WORKDIR /build
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+ARG TARGETPLATFORM
+COPY --from=planner /build/recipe.json recipe.json
+RUN case "$TARGETPLATFORM" in \
+      linux/arm64) export RUST_TARGET=aarch64-unknown-linux-musl ;; \
+      *) export RUST_TARGET=x86_64-unknown-linux-musl ;; \
+    esac \
+    && cargo chef cook --release --recipe-path recipe.json -p router-server --target "$RUST_TARGET"
+COPY . .
+RUN case "$TARGETPLATFORM" in \
+      linux/arm64) export RUST_TARGET=aarch64-unknown-linux-musl ;; \
+      *) export RUST_TARGET=x86_64-unknown-linux-musl ;; \
+    esac \
+    && cargo build --release -p router-server --target "$RUST_TARGET" \
+    && cp "target/$RUST_TARGET/release/router-server" /usr/local/bin/router-server
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /usr/local/bin/router-server /usr/local/bin/router-server
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/router-server"]
