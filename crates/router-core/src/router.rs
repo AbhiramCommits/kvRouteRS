@@ -12,6 +12,7 @@ use crate::{Pool, RouterConfig, RouterError, RoutingPolicy};
 /// The outcome of a routing decision.
 #[derive(Debug, Clone)]
 pub struct RouteDecision {
+    /// The worker the request should be proxied to.
     pub worker: Worker,
     /// Longest prefix of the prompt's block chain the chosen worker is believed
     /// to hold, measured before this request was recorded against it.
@@ -96,6 +97,8 @@ pub struct Router {
 }
 
 impl Router {
+    /// Build a router over `registry` using the policy and tuning knobs from
+    /// `config`. The prefix index starts empty; it learns as requests route.
     pub fn new(registry: Arc<WorkerRegistry>, config: &RouterConfig) -> Self {
         Self {
             registry,
@@ -109,18 +112,22 @@ impl Router {
         }
     }
 
+    /// The configured routing policy.
     pub fn policy(&self) -> RoutingPolicy {
         self.policy
     }
 
+    /// The shared worker registry.
     pub fn registry(&self) -> Arc<WorkerRegistry> {
         Arc::clone(&self.registry)
     }
 
+    /// The prefix index this router records into and scores from.
     pub fn prefix_index(&self) -> Arc<PrefixIndex> {
         Arc::clone(&self.prefix_index)
     }
 
+    /// The shared in-flight tracker (load term of the score).
     pub fn inflight(&self) -> Arc<InflightTracker> {
         Arc::clone(&self.inflight)
     }

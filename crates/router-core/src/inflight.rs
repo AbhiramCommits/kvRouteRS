@@ -5,17 +5,19 @@ use crate::worker::WorkerId;
 
 /// Lock-free per-worker in-flight request counts.
 ///
-/// Worker ids are dense `0..n` by construction ([`WorkerRegistry::from_config`]
+/// Worker ids are dense `0..n` by construction (`WorkerRegistry::from_config`
 /// assigns them in configuration order), so a `Vec<AtomicU64>` gives index-free
 /// lookups. Reads take a cheap, uncontended `RwLock` read guard around the vec
 /// (so runtime-registered workers can resize it); the rare write guard is only
 /// taken by `ensure_capacity` when Kubernetes discovery adds workers.
 #[derive(Debug)]
 pub struct InflightTracker {
+    /// One atomic counter per worker id (dense 0..n).
     counts: RwLock<Vec<AtomicU64>>,
 }
 
 impl InflightTracker {
+    /// Allocate counters for `workers` static workers.
     pub fn with_capacity(workers: usize) -> Self {
         Self {
             counts: RwLock::new((0..workers).map(|_| AtomicU64::new(0)).collect()),
@@ -91,6 +93,7 @@ pub struct InflightGuard {
 }
 
 impl InflightGuard {
+    /// Increment `worker`'s in-flight count and return the releasing guard.
     pub fn acquire(tracker: &Arc<InflightTracker>, worker: WorkerId) -> Self {
         tracker.increment(worker);
         Self {
@@ -99,6 +102,7 @@ impl InflightGuard {
         }
     }
 
+    /// The worker this guard holds a slot for.
     pub fn worker(&self) -> WorkerId {
         self.worker
     }

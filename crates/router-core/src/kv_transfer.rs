@@ -32,6 +32,7 @@ pub struct MockKvTransfer {
 }
 
 impl MockKvTransfer {
+    /// A mock transfer that sleeps `cost` to simulate fabric latency.
     pub fn new(cost: Duration) -> Self {
         Self { cost }
     }

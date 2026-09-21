@@ -10,15 +10,20 @@ pub type WorkerId = u64;
 /// Static description of a backend worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worker {
+    /// Stable identity; never reused across replacements.
     pub id: WorkerId,
+    /// OpenAI-compatible base URL, e.g. `http://10.0.0.5:8001`.
     pub url: String,
+    /// Which inference phase this worker is provisioned for.
     pub pool: Pool,
 }
 
 /// A worker plus its runtime health state.
 #[derive(Debug, Clone)]
 pub struct WorkerState {
+    /// Static worker description.
     pub worker: Worker,
+    /// Last health-probe outcome.
     pub healthy: bool,
 }
 
@@ -147,11 +152,13 @@ impl WorkerRegistry {
         workers
     }
 
+    /// Number of workers currently marked healthy.
     pub fn healthy_count(&self) -> usize {
         let guard = self.workers.read().unwrap_or_else(|p| p.into_inner());
         guard.values().filter(|state| state.healthy).count()
     }
 
+    /// Whether at least one worker is currently marked healthy.
     pub fn any_healthy(&self) -> bool {
         let guard = self.workers.read().unwrap_or_else(|p| p.into_inner());
         guard.values().any(|state| state.healthy)

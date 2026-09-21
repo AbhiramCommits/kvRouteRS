@@ -4,7 +4,9 @@ use serde_json::Value;
 /// One chat message in the OpenAI request format.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ChatMessage {
+    /// `system`, `user`, or `assistant`.
     pub role: String,
+    /// Message text.
     pub content: String,
 }
 
@@ -16,12 +18,17 @@ pub struct ChatMessage {
 /// it only depends on serde.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
+    /// Model name, forwarded verbatim to the worker.
     pub model: String,
+    /// Conversation so far; feeds the canonical prompt.
     pub messages: Vec<ChatMessage>,
+    /// Generation budget, if the client set one.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Sampling temperature, if the client set one.
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// Whether the client wants an SSE stream.
     #[serde(default)]
     pub stream: bool,
     /// Preserved and re-serialized verbatim so unknown OpenAI fields survive

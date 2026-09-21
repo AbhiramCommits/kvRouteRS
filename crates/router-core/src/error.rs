@@ -7,17 +7,28 @@ use crate::worker::WorkerId;
 pub enum RouterError {
     /// No worker is currently marked healthy.
     #[error("no healthy workers available (policy: {policy})")]
-    NoHealthyWorkers { policy: String },
+    NoHealthyWorkers {
+        /// The policy that was being applied when selection failed.
+        policy: String,
+    },
 
     /// No healthy worker exists in the pool a disaggregated phase needs.
     #[error("no healthy workers in pool `{pool}` (policy: {policy})")]
-    NoHealthyWorkersInPool { pool: String, policy: String },
+    NoHealthyWorkersInPool {
+        /// The pool (prefill/decode/both) that came up empty.
+        pool: String,
+        /// The policy that was being applied.
+        policy: String,
+    },
 
     /// The simulated/real KV transfer between phases failed.
     #[error("KV transfer from worker {from} to worker {to} failed: {reason}")]
     KvTransfer {
+        /// Source worker of the failed transfer.
         from: WorkerId,
+        /// Destination worker of the failed transfer.
         to: WorkerId,
+        /// Why the transfer failed.
         reason: String,
     },
 

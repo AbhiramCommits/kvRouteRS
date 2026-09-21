@@ -9,14 +9,26 @@
 //! task/timer primitives (the eviction task and the mock KV transfer), never
 //! for I/O, so the core remains transport-agnostic.
 
+//! docs for public items are enforced; run `cargo doc --no-deps` to check.
+#![warn(missing_docs)]
+
+/// Configuration types loaded from `router.yaml`.
 pub mod config;
+/// Error type shared by the whole core.
 pub mod error;
+/// Tokenizer-free block prefix hashing (the cache-affinity primitive).
 pub mod hashing;
+/// Per-worker in-flight request accounting.
 pub mod inflight;
+/// KV-transfer abstraction for the disaggregated flow.
 pub mod kv_transfer;
+/// Sharded, TTL/LRU-bounded prefix index.
 pub mod prefix;
+/// OpenAI-compatible request types plus canonical prompt serialization.
 pub mod request;
+/// Routing policy implementations and the router itself.
 pub mod router;
+/// Worker registry: health tracking and identity allocation for backends.
 pub mod worker;
 
 pub use config::{DiscoveryConfig, Pool, RouterConfig, RoutingPolicy, WorkerConfig};

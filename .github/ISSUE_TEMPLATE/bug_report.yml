@@ -1,0 +1,24 @@
+name: Bug report
+about: Something is broken or behaving unexpectedly
+title: "[bug] "
+labels: bug
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Steps to reproduce, expected vs actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Environment
+      description: OS, Rust version, router version/commit, deployment (docker compose / k8s), policy in use.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Log lines (structured JSON), /metrics output, benchmark numbers, or a minimal repro.

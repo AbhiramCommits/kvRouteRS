@@ -55,7 +55,9 @@ impl fmt::Display for RoutingPolicy {
 /// A single backend worker as declared in `config/router.yaml`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct WorkerConfig {
+    /// OpenAI-compatible base URL of the worker.
     pub url: String,
+    /// Which inference phase the worker is provisioned for.
     pub pool: Pool,
 }
 
@@ -63,8 +65,10 @@ pub struct WorkerConfig {
 /// EndpointSlices of a headless service and add/remove workers live.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DiscoveryConfig {
+    /// Whether to watch Kubernetes endpoints instead of using the static list.
     #[serde(default)]
     pub enabled: bool,
+    /// Name of the headless service backing the workers.
     /// Name of the headless service backing the workers.
     #[serde(default = "default_discovery_service")]
     pub service: String,
@@ -90,8 +94,11 @@ fn default_discovery_service() -> String {
 /// Top-level router configuration.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RouterConfig {
+    /// Static worker list; may be empty when `discovery.enabled`.
     pub workers: Vec<WorkerConfig>,
+    /// How the router picks workers.
     pub routing_policy: RoutingPolicy,
+    /// How often the server polls each worker's `/health`.
     #[serde(default = "default_health_check_interval_secs")]
     pub health_check_interval_secs: u64,
     /// Character block size for prefix-hash chains (vLLM blocks are 16 tokens;

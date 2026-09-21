@@ -1,0 +1,24 @@
+name: Feature request
+about: Propose something worth building
+title: "[feature] "
+labels: enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What routing/serving problem does this solve? Link benchmark evidence if you have it.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed approach
+      description: Which seam does this hook into (routing core, KvTransfer, discovery, metrics)? Sketch the design.
+    validations:
+      required: true
+  - type: textarea
+    id: measure
+    attributes:
+      label: How would we know it worked?
+      description: Which benchmark shape, metric, or test should move?

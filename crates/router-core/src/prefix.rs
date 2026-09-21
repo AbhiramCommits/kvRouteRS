@@ -35,6 +35,7 @@ struct Shard {
     entries: RwLock<HashMap<u64, IndexEntry>>,
 }
 
+/// Outcome of one eviction sweep over the prefix index.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EvictionStats {
     /// Entries removed because they exceeded the TTL.
@@ -52,7 +53,7 @@ pub struct EvictionStats {
 /// never incorrect responses. That asymmetry (cheap reads, eventual cleanup) is
 /// what makes the index safe to consult on every request.
 ///
-/// The index is sharded ([`NUM_SHARDS`] shards behind one `RwLock` each) and
+/// The index is sharded (64 shards behind one `RwLock` each) and
 /// bounded by a background eviction task ([`PrefixIndex::spawn_eviction_task`])
 /// applying TTL expiry plus a global LRU cap.
 #[derive(Debug)]
@@ -67,6 +68,7 @@ impl Default for PrefixIndex {
 }
 
 impl PrefixIndex {
+    /// Build an empty index with all shards allocated.
     pub fn new() -> Self {
         Self {
             shards: (0..NUM_SHARDS)
@@ -169,6 +171,7 @@ impl PrefixIndex {
             .sum()
     }
 
+    /// Whether the index currently holds no entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
