@@ -10,11 +10,15 @@ from kvrouters import PrefixIndex
 
 def test_gil_released_under_threads():
     index = PrefixIndex(block_size=256)
-    prompts = [f"shared prefix payload {i} " + "x" * 800 for i in range(64)]
+    # Long prompts so each lookup does substantial GIL-released Rust work
+    # (chain hashing hundreds of blocks); with short prompts the per-call
+    # Python overhead, which holds the GIL, dominates and the timing ratio
+    # measures GIL contention rather than whether the index work overlaps.
+    prompts = [f"shared prefix payload {i} " + "x" * 50_000 for i in range(64)]
     for i, prompt in enumerate(prompts):
         index.insert(i % 8, prompt)
 
-    iterations = 20_000
+    iterations = 200
 
     def hammer():
         for i in range(iterations):
